@@ -62,22 +62,22 @@ struct server {
 
 
 /* function declarations */
-static const char *get_addr     (char *dest, struct sockaddr *sa)  ;
-static uint16_t    get_port     (struct sockaddr *sa)              ;
-static void        setup_tcp    (struct server *s)                 ;
-static void        init_server  (struct server *s)                 ;
-static int         server_poll  (struct server *s)                 ;
-static void        handle_events(struct server *s)                 ;
-static void        client_accept(struct server *s)                 ;
-static void        client_event (struct server *s, const int index);
+static const char *get_addr     (char *dest, struct sockaddr *sa);
+static uint16_t    get_port     (struct sockaddr *sa)            ;
+static void        setup_tcp    (struct server *s)               ;
+static void        init_server  (struct server *s)               ;
+static int         server_poll  (struct server *s)               ;
+static void        handle_events(struct server *s)               ;
+static void        client_accept(struct server *s)               ;
+static void        client_event (struct server *s, const int idx);
 static void        add_to_pfds  (struct server *s,
 				 struct sockaddr_storage *addr,
-				 const int new_fd)                 ;
-static void        del_from_pfds(struct server *s, const int index);
-static void        cleanup      (struct server *s)                 ;
-static void        get_file_prop(struct client *c)                 ;
-static int         file_prep    (struct client *c)                 ;
-static void        file_io      (struct client *c)                 ;
+				 const int new_fd)               ;
+static void        del_from_pfds(struct server *s, const int idx);
+static void        cleanup      (struct server *s)               ;
+static void        get_file_prop(struct client *c)               ;
+static int         file_prep    (struct client *c)               ;
+static void        file_io      (struct client *c)               ;
 
 
 /* global variables */
@@ -298,12 +298,12 @@ client_accept(struct server *s)
 
 
 static void
-client_event(struct server *s, const int index)
+client_event(struct server *s, const int idx)
 {
-	struct client *c = &(s->clients[index -1]);
+	struct client *c = &(s->clients[idx -1]);
 
 	if (c->status == DONE) {
-		del_from_pfds(s, index);
+		del_from_pfds(s, idx);
 
 		return;
 	}
@@ -390,9 +390,9 @@ err:
 
 
 static void
-del_from_pfds(struct server *s, const int index)
+del_from_pfds(struct server *s, const int idx)
 {
-	const int cl_idx = index -1;
+	const int cl_idx = idx -1;
 
 	INFO("Closing connection from \"%s (%d)\" on socket %d...\n",
 		s->clients[cl_idx].addr, s->clients[cl_idx].port,
@@ -401,7 +401,7 @@ del_from_pfds(struct server *s, const int index)
 
 	close(s->clients[cl_idx].sock_fd);
 
-	s->pfds[index]     = s->pfds[s->fd_count -1];
+	s->pfds[idx]       = s->pfds[s->fd_count -1];
 	s->clients[cl_idx] = s->clients[s->cl_count -1];
 
 	(s->fd_count)--;

@@ -65,12 +65,12 @@ struct server {
 static const char *get_addr     (char *dest, struct sockaddr *sa)  ;
 static uint16_t    get_port     (struct sockaddr *sa)              ;
 static void        setup_tcp    (struct server *s)                 ;
-static void        init_server  (struct server *s, char *argv[])   ;
+static void        init_server  (struct server *s)                 ;
 static int         server_poll  (struct server *s)                 ;
-static void        handle_evs   (struct server *s)                 ;
-static void        client_acc   (struct server *s)                 ;
-static void        client_ev    (struct server *s, const int index);
-static int         add_to_pfds  (struct server *s,
+static void        handle_events(struct server *s)                 ;
+static void        client_accept(struct server *s)                 ;
+static void        client_event (struct server *s, const int index);
+static void        add_to_pfds  (struct server *s,
 				 struct sockaddr_storage *addr,
 				 const int new_fd)                 ;
 static void        del_from_pfds(struct server *s, const int index);
@@ -116,20 +116,29 @@ get_port(struct sockaddr *sa)
 static void
 setup_tcp(struct server *s)
 {
-	int ret = 0, yes = 1, ga;
-	struct addrinfo hints = {0}, *ai, *p = NULL;
+	int ret = 0, yes = 1;
+	struct addrinfo  hints  = { 0 };
+	struct addrinfo *ai, *p = NULL;
 
 	hints.ai_family   = AF_UNSPEC;   /* IPv4 or IPv6 */
 	hints.ai_socktype = SOCK_STREAM; /* TCP */
 
-	if ((ga = getaddrinfo(s->addr, s->port, &hints, &ai)) != 0) {
+	if ((ret = getaddrinfo(s->addr, s->port, &hints, &ai)) != 0) {
 		FPERROR("set_socket_fd(): getaddrinfo: %s\n",
-			gai_strerror(ga));
+			gai_strerror(ret));
+
+		ret = -1;
 
 		goto err;
 	}
 
 	for (p = ai; p != NULL; p = p->ai_next) {
+		if (is_interrupted == 1) {
+			ret = -1;
+
+			goto intr;
+		}
+
 		ret = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
 		if (ret < 0) {
@@ -165,11 +174,14 @@ setup_tcp(struct server *s)
 		break;
 	}
 
+intr:
 	freeaddrinfo(ai);
 
 err:
-	if (p == NULL) {
-		PERROR("set_socket_fd(): Failed to bind");
+	if (ret < 0 || p == NULL) {
+		FPERROR("set_socket_fd(): "
+			"Failed to create socket descriptor\n"
+		);
 
 		exit(1);
 	}
@@ -179,10 +191,15 @@ err:
 
 
 static void
-init_server(struct server *s, char *argv[])
+init_server(struct server *s)
 {
-	s->addr    = argv[0];
-	s->port    = argv[1];
+	if (s->addr == NULL || s->port == NULL) {
+		errno = EINVAL;
+		PERROR("init_server()");
+
+		exit(1);
+	}
+
 	s->fd_size = INIT_CLIENT_SIZE;
 	s->cl_size = INIT_CLIENT_SIZE;
 
@@ -212,7 +229,7 @@ static int
 server_poll(struct server *s)
 {
 	printf(BOLD_YELLOW(
-		"[Server has started ]") "\n"
+		"[The server has started ]") "\n"
 		"|-> IP Address  : %s\n"
 		"|-> Port        : %s\n"
 		"|-> Buffer Size : %u bytes\n"
@@ -235,7 +252,7 @@ server_poll(struct server *s)
 			break;
 		}
 
-		handle_evs(s);
+		handle_events(s);
 	}
 
 	return 0;
@@ -243,28 +260,28 @@ server_poll(struct server *s)
 
 
 static void
-handle_evs(struct server *s)
+handle_events(struct server *s)
 {
 	for (uint16_t i = 0; i < (s->fd_count); i++) {
 		if ((s->pfds[i].revents & POLLIN) == 0)
 			continue;
 
 		if (s->pfds[i].fd == s->listener) {
-			client_acc(s);
+			client_accept(s);
 
 			continue;
 		}
 
-		client_ev(s, i);
+		client_event(s, i);
 	}
 }
 
 
 static void
-client_acc(struct server *s)
+client_accept(struct server *s)
 {
 	int new_fd;
-	struct sockaddr_storage addr = {0};
+	struct sockaddr_storage addr = { 0 };
 	socklen_t addr_len = sizeof(addr);
 
 	new_fd = accept(s->listener, (struct sockaddr *)&addr, &addr_len);
@@ -276,39 +293,37 @@ client_acc(struct server *s)
 	}
 
 	/* add new client to pfds array */
-	if (add_to_pfds(s, &addr, new_fd) < 0)
-		FPERROR("Cannot add new client !!!\n");
+	add_to_pfds(s, &addr, new_fd);
 }
 
 
 static void
-client_ev(struct server *s, const int index)
+client_event(struct server *s, const int index)
 {
 	struct client *c = &(s->clients[index -1]);
 
 	if (c->status == DONE) {
 		del_from_pfds(s, index);
-		
-	} else {
-		if (c->got_file_prop == true)
-			file_io(c);
-		else
-			get_file_prop(c);
+
+		return;
 	}
+
+	if (c->got_file_prop == true)
+		file_io(c);
+	else
+		get_file_prop(c);
 }
 
 
-static int
+static void
 add_to_pfds(struct server *s, struct sockaddr_storage *addr, const int new_fd)
 {
-	struct pollfd *new_pfd;
-	struct client *new_cl;
-
 	if (s->cl_count > MAX_CLIENTS)
 		goto err;
 
 	/* Resize pdfs and client array */
 	if (s->fd_count == s->fd_size) {
+		struct pollfd *new_pfd;
 		const uint16_t new_fd_size = s->fd_size * 2;
 
 		new_pfd = realloc(s->pfds, sizeof(struct pollfd) * new_fd_size);
@@ -323,6 +338,7 @@ add_to_pfds(struct server *s, struct sockaddr_storage *addr, const int new_fd)
 	}
 
 	if (s->cl_count == s->cl_size) {
+		struct client *new_cl;
 		const uint16_t new_cl_size = s->cl_size * 2;
 
 		new_cl = realloc(s->clients, sizeof(struct client) * new_cl_size);
@@ -365,12 +381,11 @@ add_to_pfds(struct server *s, struct sockaddr_storage *addr, const int new_fd)
 	(s->fd_count)++;
 	(s->cl_count)++;
 
-	return 0;
+	return;
 
 err:
 	close(new_fd);
-
-	return -1;
+	FPERROR("Cannot add new client !!!\n");
 }
 
 
@@ -379,7 +394,7 @@ del_from_pfds(struct server *s, const int index)
 {
 	const int cl_idx = index -1;
 
-	INFO("Closing connection from \"%s (%d)\" on socket %d\n",
+	INFO("Closing connection from \"%s (%d)\" on socket %d...\n",
 		s->clients[cl_idx].addr, s->clients[cl_idx].port,
 		s->clients[cl_idx].sock_fd
 	);
@@ -401,15 +416,11 @@ cleanup(struct server *s)
 {
 	close(s->listener);
 
-	if (s->pfds != NULL) {
+	if (s->pfds != NULL)
 		free(s->pfds);
-		s->pfds = NULL;
-	}
 
-	if (s->clients != NULL) {
+	if (s->clients != NULL)
 		free(s->clients);
-		s->clients = NULL;
-	}
 }
 
 
@@ -527,7 +538,7 @@ file_io(struct client *c)
 
 cleanup:
 	if (c->recvd_bytes != c->file_size) {
-		FPERROR("File \"%s\" is corrupted or file size did not match!\n"
+		FPERROR("File \"%s\" corrupted, or its size did not match!\n"
 			BOLD_WHITE("Received: ") "%" PRIu64 " bytes\n\n",
 			c->file_name, c->recvd_bytes
 		);
@@ -563,10 +574,13 @@ run_server(int argc, char *argv[])
 
 
 	int ret;
-	struct server srv = {0};
+	struct server srv = {
+		.addr = argv[0],
+		.port = argv[1]
+	};
 
 	set_signal(); /* see: ftransfer.c */
-	init_server(&srv, argv);
+	init_server(&srv);
 
 	/* Let's go! */
 	ret = server_poll(&srv);
@@ -576,10 +590,7 @@ run_server(int argc, char *argv[])
 	if (ret < 0)
 		goto err;
 
-	if (errno != 0 && errno != EINTR)
-		goto err;
-
-	INFO("Server has stopped gracefully. :3\n");
+	INFO("The server has stopped gracefully. :3\n");
 
 	return 0;
 

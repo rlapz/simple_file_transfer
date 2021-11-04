@@ -16,7 +16,7 @@
 
 static const char *app = NULL;
 
-int is_interrupted = 0;
+volatile int is_interrupted = 0;
 
 
 void
@@ -32,7 +32,7 @@ interrupt_handler(int sig)
 void
 set_signal(void)
 {
-	struct sigaction act = {0};
+	struct sigaction act = { 0 };
 
 	act.sa_handler = SIG_IGN;
 	if (sigaction(SIGPIPE, &act, NULL) < 0)

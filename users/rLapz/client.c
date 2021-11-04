@@ -24,6 +24,7 @@
 
 struct client {
 	int           tcp_fd   ;
+	FILE         *file_fd  ;
 	const char   *addr     ;
 	const char   *port     ;
 	char         *file_path;
@@ -49,20 +50,28 @@ extern int is_interrupted;
 static void
 connect_to_server(struct client *c)
 {
-	int ret = 0, rv;
-	struct addrinfo hints = {0}, *ai, *p = NULL;
+	int ret = 0;
+	struct addrinfo  hints  = { 0 };
+	struct addrinfo *ai, *p = NULL;
 
 	hints.ai_family   = AF_UNSPEC;   /* IPv4 or IPv6 */
 	hints.ai_socktype = SOCK_STREAM; /* TCP */
 
-	if ((rv = getaddrinfo(c->addr, c->port, &hints, &ai)) != 0) {
+	if ((ret = getaddrinfo(c->addr, c->port, &hints, &ai)) != 0) {
 		FPERROR("connect_to_server(): getaddrinfo: %s\n",
-			gai_strerror(rv));
+			gai_strerror(ret));
+		ret = -1;
 
-		goto btm;
+		goto err;
 	}
 
 	for (p = ai; p != NULL; p = p->ai_next) {
+		if (is_interrupted == 1) {
+			ret = -1;
+
+			goto intr;
+		}
+
 		ret = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
 		if (ret < 0) {
@@ -81,11 +90,14 @@ connect_to_server(struct client *c)
 		break;
 	}
 
+intr:
 	freeaddrinfo(ai);
 
-btm:
-	if (p == NULL) {
-		FPERROR("connect_to_server(): Failed to connect\n");
+err:
+	if (ret < 0 || p == NULL) {
+		FPERROR("connect_to_server(): "
+			"Failed to create socket descriptor\n"
+		);
 
 		exit(1);
 	}
@@ -99,10 +111,19 @@ btm:
 static void
 set_file_prop(struct client *c)
 {
+	int    ffd;
 	char  *base_name;
 	struct stat st;
 
-	if (stat(c->file_path, &st) < 0)
+	/* open file */
+	if ((c->file_fd = fopen(c->file_path, "r")) == NULL)
+		goto err;
+
+	/* obtain file descriptor */
+	if ((ffd = fileno(c->file_fd)) < 0)
+		goto err;
+
+	if (fstat(ffd, &st) < 0)
 		goto err;
 
 	if (S_ISDIR(st.st_mode)) {
@@ -116,7 +137,7 @@ set_file_prop(struct client *c)
 	c->pkt.prop.file_size     = htobe64(c->file_size);
 	c->pkt.prop.file_name_len = (uint8_t)strlen(base_name);
 
-	memcpy(c->pkt.prop.file_name, base_name, c->pkt.prop.file_name_len);
+	memcpy(c->pkt.prop.file_name, base_name, c->pkt.prop.file_name_len +1);
 
 	if (file_check(&(c->pkt.prop)) < 0) /* see: ftransfer.c */
 		goto err;
@@ -140,19 +161,19 @@ send_all(const char *buffer, size_t *size, const int sock_fd)
 	while (b_total < (*size) && is_interrupted == 0) {
 		b_sent = send(sock_fd, buffer + b_total, (*size) - b_total, 0);
 
-		if (b_sent < 0) {
-			PERROR("send_all(): send");
-
+		if (b_sent <= 0)
 			break;
-		}
 
 		b_total += (size_t)b_sent;
 	}
 
 	(*size) = b_total;
 
-	if (b_sent < 0)
+	if (b_sent < 0) {
+		PERROR("send_all(): send");
+
 		return -1;
+	}
 
 	return 0;
 }
@@ -176,53 +197,37 @@ send_file_prop(struct client *c)
 static void
 send_file(struct client *c)
 {
-	FILE    *file_fd;
 	size_t   b_read;
 	uint64_t b_total = 0;
 
-
-	/* open file */
-	if ((file_fd = fopen(c->file_path, "r")) == NULL) {
-		FPERROR("send_file(): File \"%s\": %s\n",
-			c->file_path, strerror(errno));
-
-		close(c->tcp_fd);
-		exit(1);
-	}
 
 	memset(&(c->pkt), 0, sizeof(union pkt_uni));
 
 	INFO("Sending... \n");
 	while (b_total < (c->file_size) && is_interrupted == 0) {
-		b_read = fread(c->pkt.raw, sizeof(char), BUFFER_SIZE, file_fd);
+		b_read = fread(c->pkt.raw, sizeof(char), BUFFER_SIZE, c->file_fd);
 
 		if (send_all(c->pkt.raw, (size_t *)&b_read, c->tcp_fd) < 0)
 			break;
 
 		b_total += (uint64_t)b_read;
 
-		if (feof(file_fd) != 0)
+		if (feof(c->file_fd) != 0)
 			break;
 
-		if (ferror(file_fd) != 0) {
+		if (ferror(c->file_fd) != 0) {
 			PERROR("send_file(): fread");
 
 			break;
 		}
 	}
 
-	fclose(file_fd);
+	fclose(c->file_fd);
 	close(c->tcp_fd);
 
 	if (b_total != (c->file_size)) {
 		FPERROR("File size did not match!\n"
 			"Sent: %" PRIu64 " bytes\n", b_total);
-
-		exit(1);
-	}
-
-	if (errno != 0) {
-		PERROR("send_file()");
 
 		exit(1);
 	}
@@ -264,6 +269,7 @@ run_client(int argc, char *argv[])
 		"|-> File size   : %" PRIu64 " bytes\n"
 		"|-> Destination : %s (%s)\n"
 		"`-> Buffer size : %u bytes\n\n",
+
 		client.file_path, client.pkt.prop.file_name, client.file_size,
 		client.addr, client.port, BUFFER_SIZE
 	);
